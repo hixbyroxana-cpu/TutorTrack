@@ -1,0 +1,8 @@
+{
+  "name": "TutorTrack: Private Tutoring Manager",
+  "description": "An app for private tutors to track student details, log sessions (via text or voice), manage lesson history, and automatically generate next step suggestions using AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
