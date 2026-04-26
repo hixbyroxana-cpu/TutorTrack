@@ -15,6 +15,13 @@ View your app in AI Studio: https://ai.studio/apps/5d08ae90-2cb0-4f57-aec2-bab1e
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Create [.env.local](.env.local) and set:
+   - `VITE_GEMINI_API_KEY` to your Gemini API key
+   - Firebase web config values (`VITE_FIREBASE_*`) from your Firebase project settings
+3. In Firebase Console:
+   - Create a Firestore database
+   - Enable Authentication -> Sign-in method -> Anonymous
+   - Set Firestore Rules to allow only authenticated users:
+     `allow read, write: if request.auth != null;`
+4. Run the app:
    `npm run dev`

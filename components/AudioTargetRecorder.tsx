@@ -10,11 +10,32 @@ interface AudioTargetRecorderProps {
 export function AudioTargetRecorder({ onTargetExtracted }: AudioTargetRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
+  const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  };
+
+  const extractErrorMessage = (error: unknown): string => {
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === 'string') return error;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return 'Unknown error';
+    }
+  };
+
   const startRecording = async () => {
     try {
+      setErrorMessage(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -26,38 +47,63 @@ export function AudioTargetRecorder({ onTargetExtracted }: AudioTargetRecorderPr
         }
       };
 
+      mediaRecorder.onerror = (event) => {
+        console.error('Recorder error', event);
+        setErrorMessage('Recording failed. Please try again.');
+        setIsRecording(false);
+        setIsProcessing(false);
+      };
+
       mediaRecorder.onstop = async () => {
         setIsProcessing(true);
         const mimeType = mediaRecorder.mimeType || 'audio/webm';
         const blob = new Blob(chunksRef.current, { type: mimeType });
+
+        if (chunksRef.current.length === 0 || blob.size === 0) {
+          setErrorMessage('No audio captured. Please hold record for at least 1 second and try again.');
+          setIsProcessing(false);
+          return;
+        }
         
         // Convert to base64
         const reader = new FileReader();
+        reader.onerror = () => {
+          setErrorMessage('Could not read your audio file. Please try again.');
+          setIsProcessing(false);
+        };
         reader.readAsDataURL(blob);
         reader.onloadend = async () => {
           try {
             const base64data = reader.result as string;
             // Extract just the b64 string
             const base64String = base64data.split(',')[1];
-            const targetTitle = await processVoiceTarget(base64String, mimeType);
+            const targetTitle = await withTimeout(
+              processVoiceTarget(base64String, mimeType),
+              20000,
+              'AI processing timed out. Please try a shorter recording.'
+            );
             onTargetExtracted(targetTitle);
           } catch (error) {
             console.error('Failed to process voice target', error);
+            const details = extractErrorMessage(error);
+            setErrorMessage(`AI could not convert this recording. ${details}`);
           } finally {
             setIsProcessing(false);
           }
         };
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(1000);
       setIsRecording(true);
     } catch (err) {
       console.error('Failed to start recording', err);
+      setErrorMessage('Microphone access was blocked. Please allow mic permission and retry.');
     }
   };
 
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.requestData();
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       // Stop all tracks to release microphone
@@ -109,6 +155,9 @@ export function AudioTargetRecorder({ onTargetExtracted }: AudioTargetRecorderPr
             <p className="text-xs text-slate-500 mt-1">Tap to stop.</p>
           </div>
         </>
+      )}
+      {errorMessage && (
+        <p className="mt-3 text-xs font-medium text-red-600 text-center">{errorMessage}</p>
       )}
     </div>
   );

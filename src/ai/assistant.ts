@@ -1,10 +1,59 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Student, Lesson, Target } from "../db/store";
 
+const TEXT_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash"];
+const REPORT_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash"];
+const AUDIO_MODEL_CANDIDATES = ["gemini-2.0-flash", "gemini-2.5-flash"];
+
+function getGeminiApiKey(): string {
+  const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env;
+  const key = env?.VITE_GEMINI_API_KEY;
+  if (!key) {
+    throw new Error("Missing VITE_GEMINI_API_KEY. Add it to .env.local and restart the dev server.");
+  }
+  return key;
+}
+
+async function generateWithModelFallback(
+  ai: GoogleGenAI,
+  models: string[],
+  requestFactory: (model: string) => Promise<any>
+) {
+  let lastError: unknown = null;
+  for (const model of models) {
+    try {
+      return await requestFactory(model);
+    } catch (error) {
+      lastError = error;
+      console.warn(`Gemini request failed for model ${model}, trying fallback model.`, error);
+    }
+  }
+  throw lastError ?? new Error("All Gemini model attempts failed.");
+}
+
+function normalizeAudioMimeType(mimeType: string): string {
+  // Gemini accepts base type; browser often adds codec suffixes.
+  return mimeType.split(";")[0]?.trim() || "audio/webm";
+}
+
+function parseJsonFromText(rawText: string): unknown {
+  const trimmed = rawText.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+      throw new Error("Model did not return valid JSON.");
+    }
+    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+}
+
 export async function generateFocusSuggestion(student: Student, lessons: Lesson[], targets: Target[]) {
   if (lessons.length === 0) return null;
   
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
 
   const activeTargets = targets.filter(t => t.status === 'active').map(t => t.title);
   
@@ -28,10 +77,12 @@ export async function generateFocusSuggestion(student: Student, lessons: Lesson[
   4. Keep it to a maximum of 3 sentences. Be direct, no preambles.
   `;
   
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: context,
-  });
+  const response = await generateWithModelFallback(ai, TEXT_MODEL_CANDIDATES, (model) =>
+    ai.models.generateContent({
+      model,
+      contents: context,
+    })
+  );
   
   return response.text;
 }
@@ -39,7 +90,7 @@ export async function generateFocusSuggestion(student: Student, lessons: Lesson[
 export async function generateRevisionStarter(student: Student, lessons: Lesson[]) {
   if (lessons.length === 0) return null;
   
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
   
   const context = `
   Student Name: ${student.name}
@@ -61,16 +112,18 @@ export async function generateRevisionStarter(student: Student, lessons: Lesson[
   5. Keep it concise, engaging, and directly actionable for the student. Give them the actual question to solve!
   `;
   
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: context,
-  });
+  const response = await generateWithModelFallback(ai, TEXT_MODEL_CANDIDATES, (model) =>
+    ai.models.generateContent({
+      model,
+      contents: context,
+    })
+  );
   
   return response.text;
 }
 
 export async function generateMonthlyReport(student: Student, lessons: Lesson[], targets: Target[]) {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
   
   const context = `
   Student Name: ${student.name}
@@ -106,10 +159,12 @@ export async function generateMonthlyReport(student: Student, lessons: Lesson[],
   Make it read like a polished letter or structured log (use markdown formatting).
   `;
   
-  const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview",
-    contents: context,
-  });
+  const response = await generateWithModelFallback(ai, REPORT_MODEL_CANDIDATES, (model) =>
+    ai.models.generateContent({
+      model,
+      contents: context,
+    })
+  );
   
   return response.text;
 }
@@ -122,57 +177,63 @@ export interface ExtractedLog {
 }
 
 export async function processVoiceLog(audioBase64: string, mimeType: string): Promise<ExtractedLog> {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
+  const normalizedMimeType = normalizeAudioMimeType(mimeType);
   
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: [
-      {
-        inlineData: {
-          data: audioBase64,
-          mimeType: mimeType
-        }
-      },
-      {
-        text: "You are an assistant for a private tutor. The tutor has provided an audio log outlining the recent session. Extract 'progress', 'topicsCovered', 'nextSteps', and ANY specific struggles or 'newTargets' the tutor mentions we need to focus on next. Rephrase and clean up their speech to make the logs concise. If anything is omitted, provide empty strings or empty arrays."
-      }
-    ],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          progress: { type: Type.STRING, description: "Overall progress or performance in the session." },
-          topicsCovered: { type: Type.STRING, description: "Specific topics or skills covered." },
-          nextSteps: { type: Type.STRING, description: "Homework or planned next steps for the next session." },
-          newTargets: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Specific struggles or targeted goals the student needs to work on that were mentioned in the audio log." }
+  const response = await generateWithModelFallback(ai, AUDIO_MODEL_CANDIDATES, (model) =>
+    ai.models.generateContent({
+      model,
+      contents: [
+        {
+          text: "You are an assistant for a private tutor. The tutor has provided an audio log outlining the recent session. Extract 'progress', 'topicsCovered', 'nextSteps', and ANY specific struggles or 'newTargets' the tutor mentions we need to focus on next. Rephrase and clean up their speech to make the logs concise. If anything is omitted, provide empty strings or empty arrays. Output only JSON."
         },
-        required: ["progress", "topicsCovered", "nextSteps", "newTargets"]
+        {
+          inlineData: {
+            data: audioBase64,
+            mimeType: normalizedMimeType
+          }
+        }
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            progress: { type: Type.STRING, description: "Overall progress or performance in the session." },
+            topicsCovered: { type: Type.STRING, description: "Specific topics or skills covered." },
+            nextSteps: { type: Type.STRING, description: "Homework or planned next steps for the next session." },
+            newTargets: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Specific struggles or targeted goals the student needs to work on that were mentioned in the audio log." }
+          },
+          required: ["progress", "topicsCovered", "nextSteps", "newTargets"]
+        }
       }
-    }
-  });
+    })
+  );
 
-  const parsed = JSON.parse(response.text.trim());
+  const parsed = parseJsonFromText(response.text);
   return parsed as ExtractedLog;
 }
 
 export async function processVoiceTarget(audioBase64: string, mimeType: string): Promise<string> {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
+  const normalizedMimeType = normalizeAudioMimeType(mimeType);
   
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: [
-      {
-        inlineData: {
-          data: audioBase64,
-          mimeType: mimeType
+  const response = await generateWithModelFallback(ai, AUDIO_MODEL_CANDIDATES, (model) =>
+    ai.models.generateContent({
+      model,
+      contents: [
+        {
+          text: "You are an assistant for a private tutor. The tutor has provided an audio snippet specifying a new target or struggle area for a student. Extract the core target description in a concise, actionable format (e.g., 'Factoring polynomials', 'Struggles with negative signs', 'Mastering the quadratic formula'). Keep it entirely plain text, no markdown, very brief."
+        },
+        {
+          inlineData: {
+            data: audioBase64,
+            mimeType: normalizedMimeType
+          }
         }
-      },
-      {
-        text: "You are an assistant for a private tutor. The tutor has provided an audio snippet specifying a new target or struggle area for a student. Extract the core target description in a concise, actionable format (e.g., 'Factoring polynomials', 'Struggles with negative signs', 'Mastering the quadratic formula'). Keep it entirely plain text, no markdown, very brief."
-      }
-    ]
-  });
+      ]
+    })
+  );
 
   return response.text.trim();
 }
