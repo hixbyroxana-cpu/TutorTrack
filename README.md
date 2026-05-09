@@ -16,7 +16,7 @@ View your app in AI Studio: https://ai.studio/apps/5d08ae90-2cb0-4f57-aec2-bab1e
 1. Install dependencies:
    `npm install`
 2. Create [.env.local](.env.local) and set:
-   - `VITE_GEMINI_API_KEY` to your Gemini API key
+   - `GEMINI_API_KEY` to your Gemini API key
    - Firebase web config values (`VITE_FIREBASE_*`) from your Firebase project settings
 3. In Firebase Console:
    - Create a Firestore database

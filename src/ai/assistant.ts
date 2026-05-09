@@ -1,173 +1,5 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import { Student, Lesson, Target } from "../db/store";
-
-const TEXT_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash"];
-const REPORT_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash"];
-const AUDIO_MODEL_CANDIDATES = ["gemini-2.0-flash", "gemini-2.5-flash"];
-
-function getGeminiApiKey(): string {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env;
-  const key = env?.VITE_GEMINI_API_KEY;
-  if (!key) {
-    throw new Error("Missing VITE_GEMINI_API_KEY. Add it to .env.local and restart the dev server.");
-  }
-  return key;
-}
-
-async function generateWithModelFallback(
-  ai: GoogleGenAI,
-  models: string[],
-  requestFactory: (model: string) => Promise<any>
-) {
-  let lastError: unknown = null;
-  for (const model of models) {
-    try {
-      return await requestFactory(model);
-    } catch (error) {
-      lastError = error;
-      console.warn(`Gemini request failed for model ${model}, trying fallback model.`, error);
-    }
-  }
-  throw lastError ?? new Error("All Gemini model attempts failed.");
-}
-
-function normalizeAudioMimeType(mimeType: string): string {
-  // Gemini accepts base type; browser often adds codec suffixes.
-  return mimeType.split(";")[0]?.trim() || "audio/webm";
-}
-
-function parseJsonFromText(rawText: string): unknown {
-  const trimmed = rawText.trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const firstBrace = trimmed.indexOf("{");
-    const lastBrace = trimmed.lastIndexOf("}");
-    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-      throw new Error("Model did not return valid JSON.");
-    }
-    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
-  }
-}
-
-export async function generateFocusSuggestion(student: Student, lessons: Lesson[], targets: Target[]) {
-  if (lessons.length === 0) return null;
-  
-  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
-
-  const activeTargets = targets.filter(t => t.status === 'active').map(t => t.title);
-  
-  const context = `
-  Student Name: ${student.name}
-  Age: ${student.age}
-  Level: ${student.level}
-  
-  Recent Lessons (Progress & Topics):
-  ${lessons.slice(0, 3).map(l => `- ${l.topicsCovered} | ${l.progress}`).join('\n')}
-  
-  Current Active Targets (Struggles/Goals we are working on):
-  ${activeTargets.length > 0 ? activeTargets.map(t => `- ${t}`).join('\n') : "None logged yet."}
-  
-  Based on the previous lessons and specifically the Active Targets above, suggest the primary focus for the NEXT single lesson.
-  CRITICAL CONSTRAINTS:
-  1. STRICT MAXIMUM: You must suggest a MAXIMUM of 2 specific micro-topics or activities for the entire lesson. 
-  (For example: "mastering 6 times tables" is ONE thing. "6, 7, and 8 times tables + counting in 3s and 5s" is FOUR things and is STRICTLY PROHIBITED. Do not cram lists of topics.)
-  2. A single session cannot fit too much. It is much better to focus deeply on 1 specific struggle area or target, rather than glossing over multiple concepts.
-  3. Synthesize a brief, actionable focus that tackles 1 or 2 key items MAXIMUM from the Active Targets list or recent trajectory.
-  4. Keep it to a maximum of 3 sentences. Be direct, no preambles.
-  `;
-  
-  const response = await generateWithModelFallback(ai, TEXT_MODEL_CANDIDATES, (model) =>
-    ai.models.generateContent({
-      model,
-      contents: context,
-    })
-  );
-  
-  return response.text;
-}
-
-export async function generateRevisionStarter(student: Student, lessons: Lesson[]) {
-  if (lessons.length === 0) return null;
-  
-  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
-  
-  const context = `
-  Student Name: ${student.name}
-  Age: ${student.age}
-  Level: ${student.level}
-  Curriculum: ${student.curriculum}
-  
-  Recent Lessons:
-  ${lessons.slice(0, 3).map(l => `Topics Covered: ${l.topicsCovered}
-  Observations/Progress: ${l.progress}`).join('\n\n')}
-  
-  Based strictly on the progress and topics covered in the preceding lessons, create a brief, 5-minute warm-up or "revision starter" activity to begin the NEXT session.
-  
-  CRITICAL CONSTRAINTS: 
-  1. This will be shown DIRECTLY to the student on a whiteboard/screen layout. 
-  2. Format it cleanly using Markdown.
-  3. You MUST use bullet points or numbered lists for the questions/tasks. Do NOT output a dense block of text.
-  4. If your starter involves ANY Math equations, formulas, or symbols, you MUST use standard LaTeX formatting enclosed in $ for inline equations (e.g., $x^2 + y^2 = r^2$) or $$ for block equations, so it renders correctly on screen.
-  5. Keep it concise, engaging, and directly actionable for the student. Give them the actual question to solve!
-  `;
-  
-  const response = await generateWithModelFallback(ai, TEXT_MODEL_CANDIDATES, (model) =>
-    ai.models.generateContent({
-      model,
-      contents: context,
-    })
-  );
-  
-  return response.text;
-}
-
-export async function generateMonthlyReport(student: Student, lessons: Lesson[], targets: Target[]) {
-  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
-  
-  const context = `
-  Student Name: ${student.name}
-  Age/Level: ${student.age} / ${student.level}
-  Curriculum/Goal: ${student.curriculum}
-  
-  Recent Lessons from this period:
-  ${lessons.map(l => `- ${new Date(l.date).toLocaleDateString()}: Covered: ${l.topicsCovered}. Progress: ${l.progress}`).join('\n')}
-  
-  Targets (Areas of struggle / Core Focus Areas):
-  Active/Pending Targets:
-  ${targets.filter(t => t.status === 'active').map(t => `- ${t.title}`).join('\n') || "None currently."}
-  
-  Covered/Completed Targets:
-  ${targets.filter(t => t.status === 'completed').map(t => `- ${t.title}`).join('\n') || "None currently."}
-  
-  Write a professional and encouraging "Monthly Progress Report".
-  CRITICAL constraints for addressing this report:
-  It must be written in a versatile way so it makes sense both if a parent is reading it OR if the student themselves hired the tutor and is reading it directly.
-  Do NOT specifically address "Dear Parent". Just address it neutrally or directly regarding the student's progress. Use phrasing like: "Here is a brief report of what we have covered this month during the math lessons with ${student.name}."
-  
-  It should include:
-  1. A warm opening.
-  2. "What We Covered": A summary of the topics covered this month.
-  3. "Targets Discussed & Achieved": Discuss targets they struggled with that we are currently addressing, and highlight the ones they successfully passed.
-  4. "Focus for Next Month": A brief preview of what we plan to cover next month based on their active targets and progress.
-  5. A concise, encouraging closing.
-  
-  CRITICAL SIGNATURE: You MUST sign off the end of the report exactly like this:
-  Best regards,  
-  Roxana Scurtu
-  
-  Make it read like a polished letter or structured log (use markdown formatting).
-  `;
-  
-  const response = await generateWithModelFallback(ai, REPORT_MODEL_CANDIDATES, (model) =>
-    ai.models.generateContent({
-      model,
-      contents: context,
-    })
-  );
-  
-  return response.text;
-}
+import { Lesson, Student, Target } from "../db/store";
+import { getFirebaseIdToken } from "../db/firebase";
 
 export interface ExtractedLog {
   progress: string;
@@ -176,64 +8,54 @@ export interface ExtractedLog {
   newTargets: string[];
 }
 
-export async function processVoiceLog(audioBase64: string, mimeType: string): Promise<ExtractedLog> {
-  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
-  const normalizedMimeType = normalizeAudioMimeType(mimeType);
-  
-  const response = await generateWithModelFallback(ai, AUDIO_MODEL_CANDIDATES, (model) =>
-    ai.models.generateContent({
-      model,
-      contents: [
-        {
-          text: "You are an assistant for a private tutor. The tutor has provided an audio log outlining the recent session. Extract 'progress', 'topicsCovered', 'nextSteps', and ANY specific struggles or 'newTargets' the tutor mentions we need to focus on next. Rephrase and clean up their speech to make the logs concise. If anything is omitted, provide empty strings or empty arrays. Output only JSON."
-        },
-        {
-          inlineData: {
-            data: audioBase64,
-            mimeType: normalizedMimeType
-          }
-        }
-      ],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            progress: { type: Type.STRING, description: "Overall progress or performance in the session." },
-            topicsCovered: { type: Type.STRING, description: "Specific topics or skills covered." },
-            nextSteps: { type: Type.STRING, description: "Homework or planned next steps for the next session." },
-            newTargets: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Specific struggles or targeted goals the student needs to work on that were mentioned in the audio log." }
-          },
-          required: ["progress", "topicsCovered", "nextSteps", "newTargets"]
-        }
-      }
-    })
-  );
+type AiAction =
+  | "focusSuggestion"
+  | "revisionStarter"
+  | "monthlyReport"
+  | "voiceLog"
+  | "voiceTarget";
 
-  const parsed = parseJsonFromText(response.text);
-  return parsed as ExtractedLog;
+async function requestAi<T>(action: AiAction, payload: unknown): Promise<T> {
+  const idToken = await getFirebaseIdToken();
+  if (!idToken) {
+    throw new Error("AI features need Firebase auth to be configured.");
+  }
+
+  const response = await fetch("/api/ai", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ action, payload }),
+  });
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(data?.error || "The AI request failed.");
+  }
+
+  return data.result as T;
+}
+
+export async function generateFocusSuggestion(student: Student, lessons: Lesson[], targets: Target[]) {
+  if (lessons.length === 0) return null;
+  return requestAi<string>("focusSuggestion", { student, lessons, targets });
+}
+
+export async function generateRevisionStarter(student: Student, lessons: Lesson[]) {
+  if (lessons.length === 0) return null;
+  return requestAi<string>("revisionStarter", { student, lessons });
+}
+
+export async function generateMonthlyReport(student: Student, lessons: Lesson[], targets: Target[]) {
+  return requestAi<string>("monthlyReport", { student, lessons, targets });
+}
+
+export async function processVoiceLog(audioBase64: string, mimeType: string): Promise<ExtractedLog> {
+  return requestAi<ExtractedLog>("voiceLog", { audioBase64, mimeType });
 }
 
 export async function processVoiceTarget(audioBase64: string, mimeType: string): Promise<string> {
-  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
-  const normalizedMimeType = normalizeAudioMimeType(mimeType);
-  
-  const response = await generateWithModelFallback(ai, AUDIO_MODEL_CANDIDATES, (model) =>
-    ai.models.generateContent({
-      model,
-      contents: [
-        {
-          text: "You are an assistant for a private tutor. The tutor has provided an audio snippet specifying a new target or struggle area for a student. Extract the core target description in a concise, actionable format (e.g., 'Factoring polynomials', 'Struggles with negative signs', 'Mastering the quadratic formula'). Keep it entirely plain text, no markdown, very brief."
-        },
-        {
-          inlineData: {
-            data: audioBase64,
-            mimeType: normalizedMimeType
-          }
-        }
-      ]
-    })
-  );
-
-  return response.text.trim();
+  return requestAi<string>("voiceTarget", { audioBase64, mimeType });
 }

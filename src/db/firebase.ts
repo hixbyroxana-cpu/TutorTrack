@@ -25,3 +25,15 @@ export async function ensureFirebaseAuth(): Promise<void> {
   if (!auth || auth.currentUser) return;
   await signInAnonymously(auth);
 }
+
+export async function getFirebaseUserId(): Promise<string | null> {
+  if (!auth) return null;
+  await ensureFirebaseAuth();
+  return auth.currentUser?.uid ?? null;
+}
+
+export async function getFirebaseIdToken(): Promise<string | null> {
+  if (!auth) return null;
+  await ensureFirebaseAuth();
+  return auth.currentUser?.getIdToken() ?? null;
+}

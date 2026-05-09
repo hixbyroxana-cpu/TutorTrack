@@ -1,10 +1,11 @@
 import localforage from 'localforage';
 import { v4 as uuidv4 } from 'uuid';
 import { collection, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
-import { firestore, isFirestoreConfigured } from './firebase';
+import { firestore, getFirebaseUserId, isFirestoreConfigured } from './firebase';
 
 export interface Student {
   id: string;
+  ownerId?: string;
   name: string;
   age: string;
   level: string;
@@ -14,6 +15,7 @@ export interface Student {
 
 export interface Lesson {
   id: string;
+  ownerId?: string;
   studentId: string;
   date: number;
   progress: string;
@@ -24,6 +26,7 @@ export interface Lesson {
 
 export interface Target {
   id: string;
+  ownerId?: string;
   studentId: string;
   title: string;
   status: 'active' | 'completed';
@@ -45,6 +48,15 @@ function disableFirestore(error: unknown, operation: string) {
   canUseFirestore = false;
 }
 
+async function requireOwnerId(operation: string): Promise<string | null> {
+  const ownerId = await getFirebaseUserId();
+  if (!ownerId) {
+    disableFirestore(new Error('Firebase auth is not available.'), operation);
+    return null;
+  }
+  return ownerId;
+}
+
 async function withFirestoreTimeout<T>(operation: Promise<T>, label: string, timeoutMs = 4000): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -64,7 +76,10 @@ export const store = {
   async getStudents(): Promise<Student[]> {
     if (studentsCollection && canUseFirestore) {
       try {
-        const snapshot = await withFirestoreTimeout(getDocs(studentsCollection), 'getStudents');
+        const ownerId = await requireOwnerId('Firestore getStudents.auth');
+        if (!ownerId) throw new Error('Missing Firebase user.');
+        const studentsQuery = query(studentsCollection, where('ownerId', '==', ownerId));
+        const snapshot = await withFirestoreTimeout(getDocs(studentsQuery), 'getStudents');
         const students = snapshot.docs.map((entry) => entry.data() as Student);
         return students.sort((a, b) => b.createdAt - a.createdAt);
       } catch (error) {
@@ -81,7 +96,10 @@ export const store = {
         const studentRef = doc(studentsCollection, id);
         const studentSnapshot = await withFirestoreTimeout(getDoc(studentRef), 'getStudent');
         if (!studentSnapshot.exists()) return undefined;
-        return studentSnapshot.data() as Student;
+        const student = studentSnapshot.data() as Student;
+        const ownerId = await requireOwnerId('Firestore getStudent.auth');
+        if (!ownerId || student.ownerId !== ownerId) return undefined;
+        return student;
       } catch (error) {
         disableFirestore(error, 'Firestore getStudent');
       }
@@ -99,8 +117,11 @@ export const store = {
 
     if (studentsCollection && canUseFirestore) {
       try {
-        await withFirestoreTimeout(setDoc(doc(studentsCollection, newStudent.id), newStudent), 'saveStudent');
-        return newStudent;
+        const ownerId = await requireOwnerId('Firestore saveStudent.auth');
+        if (!ownerId) throw new Error('Missing Firebase user.');
+        const ownedStudent = { ...newStudent, ownerId };
+        await withFirestoreTimeout(setDoc(doc(studentsCollection, ownedStudent.id), ownedStudent), 'saveStudent');
+        return ownedStudent;
       } catch (error) {
         disableFirestore(error, 'Firestore saveStudent');
       }
@@ -113,10 +134,12 @@ export const store = {
   async getLessons(studentId: string): Promise<Lesson[]> {
     if (lessonsCollection && canUseFirestore) {
       try {
-        const lessonsQuery = query(lessonsCollection, where('studentId', '==', studentId));
+        const ownerId = await requireOwnerId('Firestore getLessons.auth');
+        if (!ownerId) throw new Error('Missing Firebase user.');
+        const lessonsQuery = query(lessonsCollection, where('ownerId', '==', ownerId));
         const snapshot = await withFirestoreTimeout(getDocs(lessonsQuery), 'getLessons');
         const lessons = snapshot.docs.map((entry) => entry.data() as Lesson);
-        return lessons.sort((a, b) => b.date - a.date);
+        return lessons.filter((lesson) => lesson.studentId === studentId).sort((a, b) => b.date - a.date);
       } catch (error) {
         disableFirestore(error, 'Firestore getLessons');
       }
@@ -135,8 +158,11 @@ export const store = {
 
     if (lessonsCollection && canUseFirestore) {
       try {
-        await withFirestoreTimeout(setDoc(doc(lessonsCollection, newLesson.id), newLesson), 'saveLesson');
-        return newLesson;
+        const ownerId = await requireOwnerId('Firestore saveLesson.auth');
+        if (!ownerId) throw new Error('Missing Firebase user.');
+        const ownedLesson = { ...newLesson, ownerId };
+        await withFirestoreTimeout(setDoc(doc(lessonsCollection, ownedLesson.id), ownedLesson), 'saveLesson');
+        return ownedLesson;
       } catch (error) {
         disableFirestore(error, 'Firestore saveLesson');
       }
@@ -153,11 +179,15 @@ export const store = {
         const lessonRef = doc(lessonsCollection, id);
         const lessonSnapshot = await withFirestoreTimeout(getDoc(lessonRef), 'updateLesson.getDoc');
         if (!lessonSnapshot.exists()) return null;
+        const existingLesson = lessonSnapshot.data() as Lesson;
+        const ownerId = await requireOwnerId('Firestore updateLesson.auth');
+        if (!ownerId || existingLesson.ownerId !== ownerId) return null;
 
-        await withFirestoreTimeout(updateDoc(lessonRef, updates), 'updateLesson.updateDoc');
+        const safeUpdates = { ...updates, ownerId };
+        await withFirestoreTimeout(updateDoc(lessonRef, safeUpdates), 'updateLesson.updateDoc');
         return {
-          ...(lessonSnapshot.data() as Lesson),
-          ...updates,
+          ...existingLesson,
+          ...safeUpdates,
         };
       } catch (error) {
         disableFirestore(error, 'Firestore updateLesson');
@@ -182,10 +212,12 @@ export const store = {
   async getTargets(studentId: string): Promise<Target[]> {
     if (targetsCollection && canUseFirestore) {
       try {
-        const targetsQuery = query(targetsCollection, where('studentId', '==', studentId));
+        const ownerId = await requireOwnerId('Firestore getTargets.auth');
+        if (!ownerId) throw new Error('Missing Firebase user.');
+        const targetsQuery = query(targetsCollection, where('ownerId', '==', ownerId));
         const snapshot = await withFirestoreTimeout(getDocs(targetsQuery), 'getTargets');
         const targets = snapshot.docs.map((entry) => entry.data() as Target);
-        return targets.sort((a, b) => b.createdAt - a.createdAt);
+        return targets.filter((target) => target.studentId === studentId).sort((a, b) => b.createdAt - a.createdAt);
       } catch (error) {
         disableFirestore(error, 'Firestore getTargets');
       }
@@ -204,8 +236,11 @@ export const store = {
 
     if (targetsCollection && canUseFirestore) {
       try {
-        await withFirestoreTimeout(setDoc(doc(targetsCollection, newTarget.id), newTarget), 'saveTarget');
-        return newTarget;
+        const ownerId = await requireOwnerId('Firestore saveTarget.auth');
+        if (!ownerId) throw new Error('Missing Firebase user.');
+        const ownedTarget = { ...newTarget, ownerId };
+        await withFirestoreTimeout(setDoc(doc(targetsCollection, ownedTarget.id), ownedTarget), 'saveTarget');
+        return ownedTarget;
       } catch (error) {
         disableFirestore(error, 'Firestore saveTarget');
       }
@@ -222,11 +257,15 @@ export const store = {
         const targetRef = doc(targetsCollection, id);
         const targetSnapshot = await withFirestoreTimeout(getDoc(targetRef), 'updateTarget.getDoc');
         if (!targetSnapshot.exists()) return null;
+        const existingTarget = targetSnapshot.data() as Target;
+        const ownerId = await requireOwnerId('Firestore updateTarget.auth');
+        if (!ownerId || existingTarget.ownerId !== ownerId) return null;
 
-        await withFirestoreTimeout(updateDoc(targetRef, updates), 'updateTarget.updateDoc');
+        const safeUpdates = { ...updates, ownerId };
+        await withFirestoreTimeout(updateDoc(targetRef, safeUpdates), 'updateTarget.updateDoc');
         return {
-          ...(targetSnapshot.data() as Target),
-          ...updates
+          ...existingTarget,
+          ...safeUpdates
         };
       } catch (error) {
         disableFirestore(error, 'Firestore updateTarget');

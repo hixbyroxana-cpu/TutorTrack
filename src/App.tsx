@@ -23,6 +23,28 @@ import { generateFocusSuggestion, generateRevisionStarter, generateMonthlyReport
 import html2pdf from 'html2pdf.js';
 import { marked } from 'marked';
 
+function escapeHtml(value: string) {
+  const div = document.createElement('div');
+  div.textContent = value;
+  return div.innerHTML;
+}
+
+function sanitizeHtml(html: string) {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  template.content.querySelectorAll('script, style, iframe, object, embed, link, meta').forEach((node) => node.remove());
+  template.content.querySelectorAll('*').forEach((node) => {
+    for (const attribute of Array.from(node.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim().toLowerCase();
+      if (name.startsWith('on') || ((name === 'href' || name === 'src') && value.startsWith('javascript:'))) {
+        node.removeAttribute(attribute.name);
+      }
+    }
+  });
+  return template.innerHTML;
+}
+
 function Dashboard() {
   const [students, setStudents] = useState<Student[]>([]);
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -481,18 +503,20 @@ function StudentDetails() {
 
                 // Create a beautiful off-screen HTML element
                 const container = document.createElement('div');
+                const safeStudentName = escapeHtml(student.name);
+                const safeReportHtml = sanitizeHtml(String(marked.parse(reportText)));
                 container.innerHTML = `
                   <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; font-size: 13px; background: white;">
                     <div style="border-bottom: 3px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
                       <h1 style="color: #0f172a; margin: 0; font-size: 24px; font-weight: 800;">Monthly Progress Report</h1>
                       <div style="display: flex; justify-content: space-between; margin-top: 8px; color: #64748b; font-size: 12px;">
-                        <span>Student: <strong>${student.name}</strong></span>
+                        <span>Student: <strong>${safeStudentName}</strong></span>
                         <span>Date: <strong>${format(new Date(), 'MMM d, yyyy')}</strong></span>
                       </div>
                     </div>
                     
                     <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 24px; box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.05); line-height: 1.5;">
-                      ${marked.parse(reportText)}
+                      ${safeReportHtml}
                     </div>
                     
                     <div style="margin-top: 30px; padding-top: 15px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 12px; text-align: center;">
@@ -515,10 +539,10 @@ function StudentDetails() {
 
                 const opt = {
                   margin:       0.75,
-                  filename:     `${student.name}-monthly-report.pdf`,
-                  image:        { type: 'jpeg', quality: 0.98 },
+                  filename:     `${student.name.replace(/[^\w.-]+/g, '-')}-monthly-report.pdf`,
+                  image:        { type: 'jpeg' as const, quality: 0.98 },
                   html2canvas:  { scale: 2, useCORS: true },
-                  jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
+                  jsPDF:        { unit: 'in' as const, format: 'letter' as const, orientation: 'portrait' as const }
                 };
                 
                 html2pdf().set(opt).from(container).save();
