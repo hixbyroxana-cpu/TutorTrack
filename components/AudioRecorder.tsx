@@ -79,8 +79,8 @@ export function AudioRecorder({ onLogExtracted }: AudioRecorderProps) {
             const base64String = base64data.split(',')[1];
             const log = await withTimeout(
               processVoiceLog(base64String, mimeType),
-              20000,
-              'AI processing timed out. Please try a shorter recording.'
+              90000,
+              'AI processing timed out. Please try again, or split a very long lesson note into two recordings.'
             );
             onLogExtracted(log);
           } catch (error) {

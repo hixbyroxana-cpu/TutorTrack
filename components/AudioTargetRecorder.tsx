@@ -79,8 +79,8 @@ export function AudioTargetRecorder({ onTargetExtracted }: AudioTargetRecorderPr
             const base64String = base64data.split(',')[1];
             const targetTitle = await withTimeout(
               processVoiceTarget(base64String, mimeType),
-              20000,
-              'AI processing timed out. Please try a shorter recording.'
+              45000,
+              'AI processing timed out. Please try again with a shorter target.'
             );
             onTargetExtracted(targetTitle);
           } catch (error) {
